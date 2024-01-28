@@ -8,7 +8,7 @@
 # MAGIC <div style="float:right">
 # MAGIC   <img src="https://github.com/grandintegrator/gnn-db-blogpost/blob/main/media/step_1-2.png?raw=True" alt="graph-training" width="840px", />
 # MAGIC </div>
-# MAGIC 
+# MAGIC
 # MAGIC We begin by ingesting our streaming data using Autoloader and saving as a delta table. Additionally we read in CSV files from our internal teams and convert them to delta tables for more efficient querying.
 
 # COMMAND ----------
@@ -45,20 +45,21 @@ full_data_path = f"dbfs:/FileStore/{data_path}/"
 # COMMAND ----------
 
 # DBTITLE 1,Defining as streaming source (our streaming landing zone) and destination, a delta table called bronze_company_data
-bronze_relation_data = spark.readStream\
-                         .format("cloudFiles")\
-                         .option("cloudFiles.format", "json")\
-                         .option("cloudFiles.schemaLocation", full_data_path+"_bronze_schema_loc")\
-                         .option("cloudFiles.inferColumnTypes", "true")\
-                         .load(full_data_path + "stream_landing_location")
+bronze_relation_data = (
+    spark.readStream
+    .format("cloudFiles")
+    .option("cloudFiles.format", "json")
+    .option("cloudFiles.schemaLocation", full_data_path+"_bronze_schema_loc")
+    .option("cloudFiles.inferColumnTypes", "true")
+    .load(full_data_path + "stream_landing_location")
 
-bronze_relation_data.writeStream\
-                    .format("delta")\
-                    .option("mergeSchema", "true")\
-                    .option("checkpointLocation", full_data_path + "_checkpoint_bronze_stream")\
-                    .trigger(once=True)\
-                    .table("bronze_relation_data")\
-                    .awaitTermination()
+(bronze_relation_data.writeStream
+    .format("delta")
+    .option("mergeSchema", "true")
+    .option("checkpointLocation", full_data_path + "_checkpoint_bronze_stream")
+    .trigger(once=True)
+    .table("bronze_relation_data")
+    .awaitTermination())
 
 # COMMAND ----------
 
@@ -77,11 +78,11 @@ display(bronze_company_data)
 # DBTITLE 1,Read our finance tables and register them into our Database
 # Read from CSV file and save as Delta
 def read_and_write_to_db(table_name: str) -> None:
-  (spark.read\
-        .option("inferSchema", "true")\
-        .option("header", "true")\
-        .option("delimiter", ",")\
-        .csv(f"dbfs:/FileStore/{data_path}/finance_data/{table_name}.csv")\
+    (spark.read
+        .option("inferSchema", "true")
+        .option("header", "true")
+        .option("delimiter", ",")
+        .csv(f"dbfs:/FileStore/{data_path}/finance_data/{table_name}.csv")
         .write.format("delta").mode("overwrite").saveAsTable(table_name))
 
 read_and_write_to_db("company_risk_data")
@@ -154,7 +155,3 @@ display(spark.table("silver_relation_data"))
 
 # MAGIC %md
 # MAGIC Next, we will use this Silver data to train our GNN and refine the low likelihood links that we omitted going from Bronze to Silver. The GNN will be trained on relatively confident links in the next notbook.
-
-# COMMAND ----------
-
-
