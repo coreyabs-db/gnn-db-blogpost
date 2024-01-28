@@ -13,7 +13,7 @@ from warnings import simplefilter
 from typing import Dict, Any, List
 
 # Graph machine learning:
-!pip install dgl
+#!pip install dgl
 
 # Uncomment below if you want to run on GPU
 # !pip install -U spacy
@@ -62,39 +62,39 @@ import torch.nn.functional as F
 # COMMAND ----------
 
 def get_datasets_from_git(data_path: str) -> None:
-  import os
-  import zipfile
-  
-  dbutils.fs.mkdirs(f"dbfs:/FileStore/{data_path}/stream_landing_location/")
-  working_dir = os.path.split(os.getcwd())[0]
-  
-  with zipfile.ZipFile(f"{working_dir}/data/streamed_data.zip", "r") as zip_ref:
-      zip_ref.extractall(f"/dbfs/FileStore/{data_path}" + "/stream_landing_location")
-  
-  with zipfile.ZipFile(f"{working_dir}/data/finance_data.zip","r") as zip_ref:
+    import os
+    import zipfile
+    
+    dbutils.fs.mkdirs(f"dbfs:/FileStore/{data_path}/stream_landing_location/")
+    working_dir = os.path.split(os.getcwd())[0]
+    
+    with zipfile.ZipFile(f"{working_dir}/data/streamed_data.zip", "r") as zip_ref:
+        zip_ref.extractall(f"/dbfs/FileStore/{data_path}" + "/stream_landing_location")
+    
+    with zipfile.ZipFile(f"{working_dir}/data/finance_data.zip","r") as zip_ref:
         zip_ref.extractall(f"/dbfs/FileStore/{data_path}")
 
 # COMMAND ----------
 
 def draw_probability_distribution(dataframe, probability_col):
-  dataframe = dataframe.toPandas()
-  dataframe[probability_col] = dataframe[probability_col].astype('float')
-  
-  import plotly.express as px
-  import plotly.io as pio
-  pio.templates.default = "plotly_white"
-  
-  fig = px.violin(dataframe,
-                  x=probability_col,
-                  box=True, # draw box plot inside the violin
-                  points='all', # can be 'outliers', or False
-                 )
-  fig.update_layout(font_family='Arial',
-                  title='Distribution of confidence values',
-                  yaxis_title=r"Density",
-                  xaxis_title=r"Probability",
-                  font=dict(size=24))
-  fig.show()
+    dataframe = dataframe.toPandas()
+    dataframe[probability_col] = dataframe[probability_col].astype('float')
+    
+    import plotly.express as px
+    import plotly.io as pio
+    pio.templates.default = "plotly_white"
+    
+    fig = px.violin(dataframe,
+                    x=probability_col,
+                    box=True, # draw box plot inside the violin
+                    points='all') # can be 'outliers', or False
+                  
+    fig.update_layout(font_family='Arial',
+                    title='Distribution of confidence values',
+                    yaxis_title=r"Density",
+                    xaxis_title=r"Probability",
+                    font=dict(size=24))
+    fig.show()
 
 # COMMAND ----------
 
@@ -103,29 +103,25 @@ def draw_probability_distribution(dataframe, probability_col):
 # COMMAND ----------
 
 params = {
-  "test_p": 0.10,
-  "valid_p": 0.20,
-  "optimiser": "Adam",
-  "loss": "binary_cross_entropy",
-  "num_node_features": 15,
-  "num_hidden_graph_layers": 20,
-  "num_negative_samples": 10,
-  "num_classes": 2,
-  "batch_size": 12, # Mini batch size for the graph
-  "num_epochs": 200,
-  "num_workers": 0,
-  "lr": 0.001,
-  "l2_regularisation": 0.0005,
-  "momentum": 0.05,
-  "aggregator_type": "mean", 
-  "device": "cpu"
+    "test_p": 0.10,
+    "valid_p": 0.20,
+    "optimiser": "Adam",
+    "loss": "binary_cross_entropy",
+    "num_node_features": 15,
+    "num_hidden_graph_layers": 20,
+    "num_negative_samples": 10,
+    "num_classes": 2,
+    "batch_size": 12, # Mini batch size for the graph
+    "num_epochs": 200,
+    "num_workers": 0,
+    "lr": 0.001,
+    "l2_regularisation": 0.0005,
+    "momentum": 0.05,
+    "aggregator_type": "mean", 
+    "device": "cpu"
 }
 
 # COMMAND ----------
 
 simplefilter(action='ignore', category=UserWarning)
 simplefilter(action='ignore', category=FutureWarning)
-
-# COMMAND ----------
-
-

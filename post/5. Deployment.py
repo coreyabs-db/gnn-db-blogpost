@@ -1,11 +1,13 @@
 # Databricks notebook source
 # MAGIC %md-sandbox 
-# MAGIC 
+# MAGIC
+# MAGIC ## 5. Deploying our GNN to continuously refine our candidate edges!
+# MAGIC
+# MAGIC
 # MAGIC <div style="float:right">
 # MAGIC   <img src="https://github.com/grandintegrator/gnn-db-blogpost/blob/main/media/step_3-3.png?raw=True" alt="graph-training" width="700px", />
 # MAGIC </div>
-# MAGIC 
-# MAGIC ## 4.1 Deploying our GNN to continuously refine our candidate edges!
+# MAGIC
 # MAGIC Now that we have tuned our GNN and graph design choices, we can deploy our GNN as a UDF for distributed inference using mlflow. During inference we expect inputs in the form of the silver table. We will query the GNN as to whether or not a low confidence link should indeed be added to the overall network. If the GNN provides a high likelihood for the link, then we will add the link to silver table thereby creating a gold table.
 
 # COMMAND ----------
@@ -14,12 +16,17 @@
 # MAGIC <div style="float:right">
 # MAGIC   <img src="https://github.com/grandintegrator/gnn-db-blogpost/blob/main/media/tsne_plot.png?raw=True" alt="graph-training" width="700px" height="400px", />
 # MAGIC </div>
-# MAGIC 
+# MAGIC
 # MAGIC The model registry allows us to version and stage models depending on their suitability for production. We can then inspect the model for the accuracy, loss, and other artifacts that will help decide whether or not to transition the model into production. For this model, we assess it's capability to distinguish between real and negatively sampled edges from our validation and testing graphs. Since this is a binary classification task, we can inspect the AUC values that we logged with the latest mlflow run. We see that the model has a **training AUC of 0.84, validation AUC of 0.93, and testing AUC of 0.95** which shoes good generalisation. We are also happy with the t-SNE plot and will therefore deploy the model to production.
 
 # COMMAND ----------
 
 # MAGIC %run ./setup
+
+# COMMAND ----------
+
+dbutils.widgets.text(name="catalog_name", defaultValue="gnn_blog", label="Catalog Name")
+dbutils.widgets.text(name="database_name", defaultValue="gnn_blog_db", label="Database Name")
 
 # COMMAND ----------
 
@@ -37,7 +44,7 @@ _ = spark.sql(f"use {catalog_name}.{database_name};")
 from mlflow import MlflowClient
 
 client = MlflowClient()
-model_name = "supply_gnn_model_ajmal_aziz"
+model_name = "supply_gnn"
 model_version = int(client.get_latest_versions(model_name)[0].version)
 
 # Latest registered model
@@ -65,9 +72,14 @@ from pyspark.sql.functions import col, struct
 silver_relation_table = spark.read.format('delta').table('silver_relation_data')
 
 # Create our gold table based on the GNN predictions
-gold_table_with_pred = silver_relation_table.withColumn("gnn_prediction", get_gnn_prediction(struct(*silver_relation_table.columns)))
+gold_table_with_pred = (
+    silver_relation_table
+    .withColumn("gnn_prediction", get_gnn_prediction(struct(*silver_relation_table.columns))[0]))
 
-gold_table_with_pred.write.format("delta").mode("overwrite").saveAsTable('gold_relations_table_with_predictions')
+(gold_table_with_pred.write
+    .format("delta")
+    .mode("overwrite")
+    .saveAsTable('gold_relations_table_with_predictions'))
 
 # COMMAND ----------
 
@@ -101,11 +113,7 @@ gold_relations.write.format("delta").mode("overwrite").saveAsTable("gold_relatio
 
 # MAGIC %md-sandbox
 # MAGIC ## 4.2 Now we can go ahead and make our supply chain Dashboard!
-# MAGIC 
+# MAGIC
 # MAGIC <div style="float:right">
 # MAGIC   <img src="https://github.com/grandintegrator/gnn-db-blogpost/blob/main/media/dashboard-1.png?raw=True" alt="graph-training" width="1000px"", />
 # MAGIC </div>
-
-# COMMAND ----------
-
-

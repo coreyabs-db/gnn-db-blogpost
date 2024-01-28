@@ -32,10 +32,10 @@ spark.sql(f"use {catalog_name}.{database_name};")
 # MAGIC <div style="float:right">
 # MAGIC   <img src="https://github.com/grandintegrator/gnn-db-blogpost/blob/main/media/training_GNNs.png?raw=True" alt="graph-training" width="840px", />
 # MAGIC </div>
-# MAGIC 
+# MAGIC
 # MAGIC ## 3.2 Training our Graph Neural Network
 # MAGIC We will train our GNN in the mini-batch setting since this format scales well as the number of nodes in the graph grow, this method of training is also referred to as stochastic training of GNNs. We will leverage a graph data loader class from dgl to facilitate the mini-batch training. Graph data loaders are task dependent. For link prediction, the GNN is trained on **edge batches**. If the task were node focused (node classification/regression) then the graph would be partitioned based on nodes and we would use a node data loader. 
-# MAGIC 
+# MAGIC
 # MAGIC Before creating the edge bunches, we partition the graph into a training, validation, and testing graph. For each of the graph splits we negatively sample negative edges (edges that do not exist within the current graph). The negative sampling scheme can get quite complex but we'll maintain a simple negative sampler for this blog. During training batches, a positive graph (actual set of connections) and a negative graph (from our negatively sampled edges) will be used to train the GNN. The GNN loss will incentivise the embeddings to score the likelihood of the negative edges as lower than real edges.
 
 # COMMAND ----------
@@ -99,7 +99,7 @@ def make_graph_partitions(graph: dgl.DGLGraph,
 
 # DBTITLE 1,Create Data Loaders in the form of edges (positive and negative) since we are performing Link Prediction
 def get_edge_dataloaders(graph_partitions: Dict[str, dgl.DGLGraph], 
-                         params: Dict[str, Any]) -> (Dict[str, dgl.dataloading.EdgeDataLoader],
+                         params: Dict[str, Any]) -> (Dict[str, dgl.dataloading.DataLoader],
                                                      Dict[str, dgl.DGLGraph],
                                                      dgl.DGLGraph):
     """
@@ -108,11 +108,13 @@ def get_edge_dataloaders(graph_partitions: Dict[str, dgl.DGLGraph],
     """
     data_loaders = {}
     sampler = dgl.dataloading.MultiLayerNeighborSampler([4, 4])
-    
+
     # Draws samples of non-existent edges from the uniform distribution
     negative_sampler = (
-      dgl.dataloading.negative_sampler.Uniform(params['num_negative_samples'])
-    )
+      dgl.dataloading.negative_sampler.Uniform(params['num_negative_samples']))
+
+    edge_sampler = dgl.dataloading.as_edge_prediction_sampler(
+        sampler, negative_sampler=negative_sampler)
 
     for split in graph_partitions.keys():
         # Create a feature vector for every node [1 x num_node_features]
@@ -122,11 +124,10 @@ def get_edge_dataloaders(graph_partitions: Dict[str, dgl.DGLGraph],
         )
 
         # Create the data loader based on the sampler and negative sampler
-        data_loaders[split] = dgl.dataloading.EdgeDataLoader(
+        data_loaders[split] = dgl.dataloading.DataLoader(
             graph_partitions[split],
             graph_partitions[split].edges(form='eid'),
-            sampler,
-            negative_sampler=negative_sampler,
+            edge_sampler,
             batch_size=params['batch_size'],
             shuffle=True,
             drop_last=False,
@@ -140,7 +141,7 @@ def get_edge_dataloaders(graph_partitions: Dict[str, dgl.DGLGraph],
 # MAGIC <div style="float:right">
 # MAGIC   <img src="https://github.com/grandintegrator/gnn-db-blogpost/blob/main/media/architecture.png?raw=True" alt="graph-training" width="700px", />
 # MAGIC </div>
-# MAGIC 
+# MAGIC
 # MAGIC ### 3.2.1 Defining the Graph Neural Network model
 # MAGIC Our GNN model will consist of two GraphSAGE layers to generate node embeddings and will be trained using the edge data loaders we have defined above. The embeddings are then fed into a seperate (simple) neural network that will take as inputs the embeddings for source and destination nodes and provide a prediction for the likelihood of a link (binary classification). More formally, the neural network acts as \\( f: (\mathbf{h}_u, \mathbf{h}_v )\rightarrow z{_u}{_v} \\). All of the network weights are trained using a single loss function, either a binary cross entropy loss or a margin loss. During training and validation we collect pseudo-accuracy metrics like the loss and the ROC-AUC and use mlflow to track the metrics during training.
 
@@ -202,7 +203,7 @@ class GraphSAGE(nn.Module):
                             if l != self.n_layers - 1
                             else self.out_feats)
             sampler = dgl.dataloading.MultiLayerFullNeighborSampler(1)
-            dataloader = dgl.dataloading.NodeDataLoader(
+            dataloader = dgl.dataloading.DataLoader(
                 g, torch.arange(g.number_of_nodes()), sampler,
                 batch_size=batch_size,
                 shuffle=True,
@@ -238,9 +239,9 @@ class Model(nn.Module):
     
     def get_embeddings(self, g, x, batch_size, device, provide_prediction=False):
       if provide_prediction:
-        return self.pred(g, x)
+          return self.pred(g, x)
       else:
-        return self.gcn.inference(g, x, batch_size, device)
+          return self.gcn.inference(g, x, batch_size, device)
 
 # COMMAND ----------
 
@@ -265,7 +266,7 @@ graph_model
 # DBTITLE 1,We define a trainer class for training the Model defined above
 class Trainer(object):
     def __init__(self, params: Dict[str, Any], model: torch.nn.Module,
-                 train_data_loader: dgl.dataloading.EdgeDataLoader,
+                 train_data_loader: dgl.dataloading.DataLoader,
                  training_graph: dgl.DGLGraph):
         self.params = params
         self.model = model
@@ -345,24 +346,24 @@ class Trainer(object):
 
 # DBTITLE 1,Define an evaluator which samples subgraphs in the validation graph and returns average ROC across the sampled subgraphs
 def evaluate(trained_model: torch.nn.Module,
-             validation_data_loader: dgl.dataloading.EdgeDataLoader) -> (List, List):
-  trained_model.eval()
-  roc_auc_sugraphs = []
-  ap_sugraphs = []
-  for input_nodes, positive_graph, negative_graph, blocks in validation_data_loader:
-    with torch.no_grad():
-        input_features = blocks[0].srcdata['feature']
-        
-        # 🔜 Forward pass through the network.
-        pos_score, neg_score = \
-            trained_model(positive_graph=positive_graph,
-                          negative_graph=negative_graph,
-                          blocks=blocks,
-                          x=input_features)
-        auc_pr_dicts = compute_auc_ap(pos_score, neg_score)
-        roc_auc_sugraphs.append(auc_pr_dicts['AUC'])
-        ap_sugraphs.append(auc_pr_dicts['AP'])
-  return roc_auc_sugraphs, ap_sugraphs
+             validation_data_loader: dgl.dataloading.DataLoader) -> (List, List):
+    trained_model.eval()
+    roc_auc_sugraphs = []
+    ap_sugraphs = []
+    for input_nodes, positive_graph, negative_graph, blocks in validation_data_loader:
+        with torch.no_grad():
+            input_features = blocks[0].srcdata['feature']
+            
+            # 🔜 Forward pass through the network.
+            pos_score, neg_score = \
+                trained_model(positive_graph=positive_graph,
+                              negative_graph=negative_graph,
+                              blocks=blocks,
+                              x=input_features)
+            auc_pr_dicts = compute_auc_ap(pos_score, neg_score)
+            roc_auc_sugraphs.append(auc_pr_dicts['AUC'])
+            ap_sugraphs.append(auc_pr_dicts['AP'])
+    return roc_auc_sugraphs, ap_sugraphs
 
 # COMMAND ----------
 
@@ -392,67 +393,91 @@ params_hyperopt = {**params_hyperopt, **static_params}
 
 # COMMAND ----------
 
+simple_params = {
+    "optimiser": "Adam",
+    "loss": "binary_cross_entropy",
+    "num_node_features": 10,
+    "num_hidden_graph_layers": 5,
+    "batch_size": 32,
+    "num_negative_samples": 3,
+    "num_epochs": 100,
+    "l2_regularisation": 5e-4,
+    "momentum": 5e-4,
+    "lr": 1e-3,
+    "aggregator_type": "mean",
+    "device": "cpu",
+    "test_p": 0.1,
+    "valid_p": 0.2,
+    "num_workers": 0,
+    "num_classes": 2
+}
+
+# COMMAND ----------
+
 # DBTITLE 1,We will use HyperOpt to search the GNN and graph-sampling parameter space
 # Let's create a static training, validation, and testing set of graphs
 graph_partitions = make_graph_partitions(graph=supplier_graph, params=params)
 
 def train_and_evaluate_gnn(params_hyperopt: Dict[str, Any]) -> Dict[str, Any]:
-  # New set of data loaders given the parameter set
-  graph_model = Model(in_features=params_hyperopt['num_node_features'],
-                      hidden_features=params_hyperopt['num_hidden_graph_layers'],
-                      out_features=params_hyperopt['num_node_features'],
-                      num_classes=params_hyperopt['num_classes'],
-                      aggregator_type=params_hyperopt['aggregator_type'])
+    # New set of data loaders given the parameter set
+    graph_model = Model(in_features=params_hyperopt['num_node_features'],
+                        hidden_features=params_hyperopt['num_hidden_graph_layers'],
+                        out_features=params_hyperopt['num_node_features'],
+                        num_classes=params_hyperopt['num_classes'],
+                        aggregator_type=params_hyperopt['aggregator_type'])
 
-  data_loaders = get_edge_dataloaders(graph_partitions=graph_partitions,
-                                      params=params_hyperopt)
+    data_loaders = get_edge_dataloaders(graph_partitions=graph_partitions,
+                                        params=params_hyperopt)
 
-  trainer = Trainer(params=params_hyperopt,
-                    model=graph_model,
-                    train_data_loader=data_loaders['training'],
-                    training_graph=graph_partitions['training'])
-  training_results = trainer.train_epochs()
+    trainer = Trainer(params=params_hyperopt,
+                      model=graph_model,
+                      train_data_loader=data_loaders['training'],
+                      training_graph=graph_partitions['training'])
+    training_results = trainer.train_epochs()
 
-  # The trained model based on the hyperparams is now fed into the validation
-  roc_auc_sugraphs, _ = evaluate(trained_model=training_results['model'], 
-                                 validation_data_loader=data_loaders['validation'])
+    # The trained model based on the hyperparams is now fed into the validation
+    roc_auc_sugraphs, _ = evaluate(trained_model=training_results['model'], 
+                                  validation_data_loader=data_loaders['validation'])
 
-  # We want to optimise for the highest auc accross the validation subgraphs
-  loss = -1*sum(roc_auc_sugraphs)/len(roc_auc_sugraphs)
+    # We want to optimise for the highest auc accross the validation subgraphs
+    loss = -1*sum(roc_auc_sugraphs)/len(roc_auc_sugraphs)
 
-  return {'loss': loss, 'status': STATUS_OK,
-          'param_hyperopt': params_hyperopt}
+    return {'loss': loss, 'status': STATUS_OK,
+            'param_hyperopt': params_hyperopt}
 
 # COMMAND ----------
 
-argmin = fmin(fn=train_and_evaluate_gnn,
-            space=params_hyperopt,
-            algo=tpe.suggest,
-            max_evals=20,
-            trials=SparkTrials(parallelism=8))
+# argmin = fmin(
+#     fn=train_and_evaluate_gnn,
+#     space=params_hyperopt,
+#     algo=tpe.suggest,
+#     max_evals=5,
+#     trials=SparkTrials(parallelism=1))
 
 # COMMAND ----------
 
 ran_hyperopt = False
+
 if ran_hyperopt:
-  best_parameters = hyperopt.space_eval(params_hyperopt, argmin)
+    best_parameters = hyperopt.space_eval(params_hyperopt, argmin)
 else: 
-  best_parameters = {'aggregator_type': 'pool',
-   'batch_size': 32,
-   'device': 'cpu',
-   'l2_regularisation': 0.005,
-   'loss': 'margin',
-   'lr': 0.01,
-   'momentum': 0.005,
-   'num_classes': 2,
-   'num_epochs': 2000,
-   'num_hidden_graph_layers': 100,
-   'num_negative_samples': 50,
-   'num_node_features': 50,
-   'num_workers': 0,
-   'optimiser': 'SGD',
-   'test_p': 0.1,
-   'valid_p': 0.2}
+    best_parameters = {
+        'aggregator_type': 'pool',
+        'batch_size': 32,
+        'device': 'cpu',
+        'l2_regularisation': 0.005,
+        'loss': 'margin',
+        'lr': 0.01,
+        'momentum': 0.005,
+        'num_classes': 2,
+        'num_epochs': 2000,
+        'num_hidden_graph_layers': 100,
+        'num_negative_samples': 50,
+        'num_node_features': 50,
+        'num_workers': 0,
+        'optimiser': 'SGD',
+        'test_p': 0.1,
+        'valid_p': 0.2}
 
 # COMMAND ----------
 
@@ -460,107 +485,116 @@ else:
 # MAGIC <div style="float:right">
 # MAGIC   <img src="https://github.com/grandintegrator/gnn-db-blogpost/blob/main/media/logged_model.gif?raw=True" alt="graph-training" width="700px", />
 # MAGIC </div>
-# MAGIC 
+# MAGIC
 # MAGIC ### 3.3.3 Logging the GNN model into the model registry using mlflow
 # MAGIC We will now take the parameters that were found with HyperOpt and create an mlflow run that will log a ```pyfunc``` flavour of our model along with a t-SNE plot of the learned embeddings. This can be viewed within the Experiments tab of Databricks. We notice that the embeddings form two large clusters. This shows **good learned embeddings!** since nodes that are connected should be clustered together and nodes that are not should be seperated. The decision boundary for the neural network will be simpler, can you see where the decision boundary would be? 
-# MAGIC 
+# MAGIC
 # MAGIC This gives us confidence to move this model to production and classify the low confidence links based on the GNN.
 
 # COMMAND ----------
 
 # DBTITLE 1,Define a custom mlflow model for our GNN as a pyfunc flavour
 class GNNWrapper(mlflow.pyfunc.PythonModel):
-  def __init__(self, model, params):
-    self.model = model
-    self.params = params
-    
-  def test(self):
-    print(self.params)
-    
-  def predict(self, context, model_input):
-    # Create a graph structure with the model_input
-    if isinstance(model_input, pd.DataFrame):
-      source_company_id = np.array([x for x in model_input['src_id'].values])
-      destination_company_id = np.array([x for x in model_input['dst_id'].values])
-      g = dgl.graph((source_company_id, destination_company_id))
-    else: 
-      g = make_dgl_graph(model_input)
-    
-    # Assign node features to the new graph of size [1 x num_node_features]
-    g.ndata['feature'] = torch.randn(g.num_nodes(),
-                                     self.params['num_node_features'])
-    with torch.no_grad():
-      predictions = \
-              self.model.get_embeddings(g=g,x=g.ndata['feature'],
-                                        batch_size=self.params['batch_size'], 
-                                        device='cpu',
-                                        provide_prediction=True)
-    return predictions.to('cpu').detach().numpy().squeeze()
+    def __init__(self, model, params):
+        self.model = model
+        self.params = params
+      
+    def test(self):
+        print(self.params)
+      
+    def predict(self, context, model_input):
+        # Create a graph structure with the model_input
+        if isinstance(model_input, pd.DataFrame):
+            source_company_id = np.array([x for x in model_input['src_id'].values])
+            destination_company_id = np.array([x for x in model_input['dst_id'].values])
+            g = dgl.graph((source_company_id, destination_company_id))
+        else: 
+            g = make_dgl_graph(model_input)
+      
+        # Assign node features to the new graph of size [1 x num_node_features]
+        g.ndata['feature'] = torch.randn(g.num_nodes(), self.params['num_node_features'])
+
+        with torch.no_grad():
+            predictions = self.model.get_embeddings(
+                g=g,x=g.ndata['feature'],
+                batch_size=self.params['batch_size'], 
+                device='cpu',
+                provide_prediction=True)
+            
+        return predictions.to('cpu').detach().numpy().squeeze()
 
 # COMMAND ----------
 
 # DBTITLE 1,We create a seperate mlflow run with the best parameters, log the model, and the t-SNE of the learned embeddings
 with mlflow.start_run(run_name="Supply Chain GNN") as run:
-  # Log the parameters of the model run
-  mlflow.set_tag("link-prediction", "GraphSAGE")
-  mlflow.log_params(best_parameters)
-  run_id = run.info.run_id
-  
-  graph_model = Model(in_features=best_parameters['num_node_features'],
-                  hidden_features=best_parameters['num_hidden_graph_layers'],
-                  out_features=best_parameters['num_node_features'],
-                  num_classes=best_parameters['num_classes'],
-                  aggregator_type=best_parameters['aggregator_type'])
+    # Log the parameters of the model run
+    mlflow.set_tag("link-prediction", "GraphSAGE")
+    mlflow.log_params(best_parameters)
+    run_id = run.info.run_id
+    
+    graph_model = Model(
+        in_features=best_parameters['num_node_features'],
+        hidden_features=best_parameters['num_hidden_graph_layers'],
+        out_features=best_parameters['num_node_features'],
+        num_classes=best_parameters['num_classes'],
+        aggregator_type=best_parameters['aggregator_type'])
 
-  data_loaders = get_edge_dataloaders(graph_partitions=graph_partitions,
-                                      params=best_parameters)
-  
-  # ----------------------------------------------------------------------------
-  # Collect results for training, validation, and testing
-  # ----------------------------------------------------------------------------
-  trainer = Trainer(params=best_parameters,
-                    model=graph_model,
-                    train_data_loader=data_loaders['training'],
-                    training_graph=graph_partitions['training'])
-  training_results = trainer.train_epochs()
-  
-  eval_aucs, eval_aps = evaluate(trained_model=training_results['model'],
-                                 validation_data_loader=data_loaders['validation'])
-  
-  mlflow.log_metric("Validation AUC - mean", sum(eval_aucs)/len(eval_aucs))
-  mlflow.log_metric("Validation AP - mean", sum(eval_aps)/len(eval_aps))
-  
-  test_aucs, test_aps = evaluate(trained_model=training_results['model'],
-                                validation_data_loader=data_loaders['testing'])
-   
-  mlflow.log_metric("Testing AUC - mean", sum(test_aucs)/len(test_aucs))
-  mlflow.log_metric("Testing AP - mean", sum(test_aps)/len(test_aps))
+    data_loaders = get_edge_dataloaders(
+        graph_partitions=graph_partitions,
+        params=best_parameters)
+    
+    # ----------------------------------------------------------------------------
+    # Collect results for training, validation, and testing
+    # ----------------------------------------------------------------------------
+    trainer = Trainer(
+        params=best_parameters,
+        model=graph_model,
+        train_data_loader=data_loaders['training'],
+        training_graph=graph_partitions['training'])
+    
+    training_results = trainer.train_epochs()
+    
+    eval_aucs, eval_aps = evaluate(
+        trained_model=training_results['model'],
+        validation_data_loader=data_loaders['validation'])
+    
+    mlflow.log_metric("Validation AUC - mean", sum(eval_aucs)/len(eval_aucs))
+    mlflow.log_metric("Validation AP - mean", sum(eval_aps)/len(eval_aps))
+    
+    test_aucs, test_aps = evaluate(
+        trained_model=training_results['model'],
+        validation_data_loader=data_loaders['testing'])
+    
+    mlflow.log_metric("Testing AUC - mean", sum(test_aucs)/len(test_aucs))
+    mlflow.log_metric("Testing AP - mean", sum(test_aps)/len(test_aps))
 
-  # ----------------------------------------------------------------------------
-  # Log the final trained model
-  # ----------------------------------------------------------------------------
-  gnn_model_pyfunc = GNNWrapper(training_results['model'], params=best_parameters)
-  
-  signature = infer_signature(silver_relation_table, 
-                              gnn_model_pyfunc.predict(None,
-                                                       model_input=silver_relation_table))
-  mlflow.pyfunc.log_model(artifact_path="gnn_model", signature=signature,
-                          python_model=gnn_model_pyfunc)
-  
-  # ----------------------------------------------------------------------------
-  # We also log the t-SNE of the learned node embeddings, a key criteria!
-  # ----------------------------------------------------------------------------
-  with torch.no_grad():
-    trained_model = training_results['model']
-    training_graph = graph_partitions['training']
-    training_graph_embeddings = (
-        trained_model.get_embeddings(g=training_graph,
-                                     x=training_graph.ndata['feature'],
-                                     batch_size=params['batch_size'],
-                                     device=params['device'])
-    )
-    t_sne_fig = plot_tsne_embeddings(graph_embeddings=training_graph_embeddings)
-    mlflow.log_figure(t_sne_fig, 'visualisations/tsne_plot.html')
+    # ----------------------------------------------------------------------------
+    # Log the final trained model
+    # ----------------------------------------------------------------------------
+    gnn_model_pyfunc = GNNWrapper(training_results['model'], params=best_parameters)
+    
+    signature = infer_signature(
+        silver_relation_table, 
+        gnn_model_pyfunc.predict(None, model_input=silver_relation_table))
+    
+    mlflow.pyfunc.log_model(
+        artifact_path="gnn_model", signature=signature,
+        python_model=gnn_model_pyfunc)
+    
+    # ----------------------------------------------------------------------------
+    # We also log the t-SNE of the learned node embeddings, a key criteria!
+    # ----------------------------------------------------------------------------
+    with torch.no_grad():
+        trained_model = training_results['model']
+        training_graph = graph_partitions['training']
+        training_graph_embeddings = (
+            trained_model.get_embeddings(
+                g=training_graph,
+                x=training_graph.ndata['feature'],
+                batch_size=params['batch_size'],
+                device=params['device']))
+        t_sne_fig = plot_tsne_embeddings(graph_embeddings=training_graph_embeddings)
+        mlflow.log_figure(t_sne_fig, 'visualisations/tsne_plot.html')
 
 # COMMAND ----------
 
@@ -574,8 +608,4 @@ print(gnn_model_pyfunc.test())
 
 # COMMAND ----------
 
-mlflow.register_model('runs:/' + run_id + '/gnn_model', 'supply_gnn_model_ajmal_aziz')
-
-# COMMAND ----------
-
-
+mlflow.register_model('runs:/' + run_id + '/gnn_model', 'supply_gnn')
