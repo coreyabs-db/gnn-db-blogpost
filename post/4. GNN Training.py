@@ -304,9 +304,12 @@ class Trainer(object):
             return binary_cross_entropy
 
     def train_epochs(self):
+        if self.params['device'] == 'cuda':
+            self.model = self.model.to(torch.device('cuda'))
+        
         self.make_optimiser()
         self.model.train()
-        
+
         with tqdm.tqdm(self.train_data_loader) as tq:
             for step, (input_nodes, positive_graph, negative_graph,
                        blocks) in enumerate(tq):
@@ -347,10 +350,16 @@ class Trainer(object):
 # DBTITLE 1,Define an evaluator which samples subgraphs in the validation graph and returns average ROC across the sampled subgraphs
 def evaluate(trained_model: torch.nn.Module,
              validation_data_loader: dgl.dataloading.DataLoader) -> (List, List):
+    is_cuda = next(graph_model.parameters()).is_cuda
     trained_model.eval()
     roc_auc_sugraphs = []
     ap_sugraphs = []
     for input_nodes, positive_graph, negative_graph, blocks in validation_data_loader:
+        if is_cuda:
+            blocks = [b.to(torch.device('cuda')) for b in blocks]
+            positive_graph = positive_graph.to(torch.device('cuda'))
+            negative_graph = negative_graph.to(torch.device('cuda'))
+
         with torch.no_grad():
             input_features = blocks[0].srcdata['feature']
             
@@ -384,33 +393,12 @@ params_hyperopt = {'optimiser': hp.choice('optimiser', ["Adam", "SGD"]),
                    'momentum': hp.choice('momentum', [5e-4, 5e-3, 5e-2]),
                    'lr': hp.choice('lr', [1e-3, 1e-5, 1e-2]),
                    'aggregator_type': hp.choice('aggregator_type', ['mean', 'pool'])}
-static_params = {'device': 'cpu',
+static_params = {'device': 'cuda' if torch.cuda.is_available() else 'cpu',
                  'test_p': 0.1,
                  'valid_p': 0.2,
                  'num_workers': 0,
                  'num_classes': 2}
 params_hyperopt = {**params_hyperopt, **static_params}
-
-# COMMAND ----------
-
-simple_params = {
-    "optimiser": "Adam",
-    "loss": "binary_cross_entropy",
-    "num_node_features": 10,
-    "num_hidden_graph_layers": 5,
-    "batch_size": 32,
-    "num_negative_samples": 3,
-    "num_epochs": 100,
-    "l2_regularisation": 5e-4,
-    "momentum": 5e-4,
-    "lr": 1e-3,
-    "aggregator_type": "mean",
-    "device": "cpu",
-    "test_p": 0.1,
-    "valid_p": 0.2,
-    "num_workers": 0,
-    "num_classes": 2
-}
 
 # COMMAND ----------
 
@@ -420,39 +408,49 @@ graph_partitions = make_graph_partitions(graph=supplier_graph, params=params)
 
 def train_and_evaluate_gnn(params_hyperopt: Dict[str, Any]) -> Dict[str, Any]:
     # New set of data loaders given the parameter set
-    graph_model = Model(in_features=params_hyperopt['num_node_features'],
-                        hidden_features=params_hyperopt['num_hidden_graph_layers'],
-                        out_features=params_hyperopt['num_node_features'],
-                        num_classes=params_hyperopt['num_classes'],
-                        aggregator_type=params_hyperopt['aggregator_type'])
+    graph_model = Model(
+        in_features=params_hyperopt['num_node_features'],
+        hidden_features=params_hyperopt['num_hidden_graph_layers'],
+        out_features=params_hyperopt['num_node_features'],
+        num_classes=params_hyperopt['num_classes'],
+        aggregator_type=params_hyperopt['aggregator_type'])
+    
+    if params_hyperopt['device'] == 'cuda':
+        graph_model.to(torch.device('cuda'))
+    
+    data_loaders = get_edge_dataloaders(
+        graph_partitions=graph_partitions,
+        params=params_hyperopt)
 
-    data_loaders = get_edge_dataloaders(graph_partitions=graph_partitions,
-                                        params=params_hyperopt)
-
-    trainer = Trainer(params=params_hyperopt,
-                      model=graph_model,
-                      train_data_loader=data_loaders['training'],
-                      training_graph=graph_partitions['training'])
+    trainer = Trainer(
+        params=params_hyperopt,
+        model=graph_model,
+        train_data_loader=data_loaders['training'],
+        training_graph=graph_partitions['training'])
+    
     training_results = trainer.train_epochs()
 
     # The trained model based on the hyperparams is now fed into the validation
-    roc_auc_sugraphs, _ = evaluate(trained_model=training_results['model'], 
-                                  validation_data_loader=data_loaders['validation'])
+    roc_auc_sugraphs, _ = evaluate(
+        trained_model=training_results['model'], 
+        validation_data_loader=data_loaders['validation'])
 
     # We want to optimise for the highest auc accross the validation subgraphs
     loss = -1*sum(roc_auc_sugraphs)/len(roc_auc_sugraphs)
 
-    return {'loss': loss, 'status': STATUS_OK,
-            'param_hyperopt': params_hyperopt}
+    return {
+        'loss': loss,
+        'status': STATUS_OK,
+        'param_hyperopt': params_hyperopt}
 
 # COMMAND ----------
 
-# argmin = fmin(
-#     fn=train_and_evaluate_gnn,
-#     space=params_hyperopt,
-#     algo=tpe.suggest,
-#     max_evals=5,
-#     trials=SparkTrials(parallelism=1))
+argmin = fmin(
+    fn=train_and_evaluate_gnn,
+    space=params_hyperopt,
+    algo=tpe.suggest,
+    max_evals=1,
+    trials=SparkTrials(parallelism=1))
 
 # COMMAND ----------
 
@@ -464,18 +462,18 @@ else:
     best_parameters = {
         'aggregator_type': 'pool',
         'batch_size': 32,
-        'device': 'cpu',
+        'device': 'cuda' if torch.cuda.is_available() else 'cpu',
         'l2_regularisation': 0.005,
         'loss': 'margin',
         'lr': 0.01,
         'momentum': 0.005,
         'num_classes': 2,
-        'num_epochs': 2000,
+        'num_epochs': 200,
         'num_hidden_graph_layers': 100,
         'num_negative_samples': 50,
         'num_node_features': 50,
         'num_workers': 0,
-        'optimiser': 'SGD',
+        'optimiser': 'Adam',
         'test_p': 0.1,
         'valid_p': 0.2}
 
@@ -571,7 +569,9 @@ with mlflow.start_run(run_name="Supply Chain GNN") as run:
     # ----------------------------------------------------------------------------
     # Log the final trained model
     # ----------------------------------------------------------------------------
-    gnn_model_pyfunc = GNNWrapper(training_results['model'], params=best_parameters)
+    trained_model = training_results['model'].to('cpu')
+
+    gnn_model_pyfunc = GNNWrapper(trained_model, params=best_parameters)
     
     signature = infer_signature(
         silver_relation_table, 
