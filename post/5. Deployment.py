@@ -36,7 +36,7 @@ dbutils.widgets.text(name="database_name", defaultValue="gnn_blog_db", label="Da
 catalog_name = dbutils.widgets.get("catalog_name")
 database_name = dbutils.widgets.get("database_name")
 
-_ = spark.sql(f"use {catalog_name}.{database_name};")
+spark.sql(f"use {catalog_name}.{database_name};");
 
 # COMMAND ----------
 

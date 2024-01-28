@@ -90,21 +90,21 @@ def create_model(params):
 
 
 def compute_auc_ap(pos_score, neg_score) -> Dict[str, Any]:
-  from torch.nn import Sigmoid
-  # Compute the AUC per type
-  results = {}
-  sigmoid = Sigmoid()
-  pos_score_edge = sigmoid(pos_score)
-  neg_score_edge = sigmoid(neg_score)
+    from torch.nn import Sigmoid
+    # Compute the AUC per type
+    results = {}
+    sigmoid = Sigmoid()
+    pos_score_edge = sigmoid(pos_score)
+    neg_score_edge = sigmoid(neg_score)
 
-  scores = cat([pos_score_edge, neg_score_edge]).detach().numpy()
-  labels = cat(
-      [ones(pos_score_edge.shape[0]),
-       zeros(neg_score_edge.shape[0])]).detach().numpy()
+    scores = cat([pos_score_edge, neg_score_edge]).detach().cpu().numpy()
+    labels = cat(
+        [ones(pos_score_edge.shape[0]),
+        zeros(neg_score_edge.shape[0])]).detach().cpu().numpy()
 
-  results['AUC'] = roc_auc_score(labels, scores)
-  results['AP'] = average_precision_score(labels, scores)
-  return results
+    results['AUC'] = roc_auc_score(labels, scores)
+    results['AP'] = average_precision_score(labels, scores)
+    return results
 
 
 def plot_tsne_embeddings(graph_embeddings: torch.Tensor):
